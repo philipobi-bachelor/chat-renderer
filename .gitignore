@@ -2,3 +2,4 @@
 *.md
 .venv
 
+__pycache__
