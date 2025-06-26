@@ -5,6 +5,7 @@ import re
 from difflib import unified_diff
 from arango import ArangoClient
 from operator import itemgetter
+import os.path
 
 class DB:
     @staticmethod
@@ -88,10 +89,10 @@ class Chat:
     
     @classmethod
     def fromKey(cls, key):
-        return cls(DB.get_document("chat-logs", key))
+        return cls(DB.getDocument("chat-logs", key))
     
-    @classmethod
-    def extractAttachments(cls, metadata_lst):
+    @staticmethod
+    def extractAttachments(metadata_lst):
         for text in (
             txt
             for meta in metadata_lst if (msgs:=meta.get("renderedUserMessage", []))
@@ -117,16 +118,12 @@ class Chat:
                 if filePath is not None:
                     text = attachment.text
                     text = re.sub(r"\s*```\S*\s*", "", text)
-                    cls.files[filePath].insert(
-                        0, 
-                        File(
-                            path = filePath,
-                            buffer = text.splitlines()
-                        )
+                    yield File(
+                        path = filePath,
+                        buffer = text.splitlines()
                     )
                 else:
                     print(f"Encountered unknown attachment\n{attachment}")
-
 
     def __init__(self, doc):
         Chat.instance = self
@@ -145,8 +142,11 @@ class Chat:
                 .get("metadata", {})
             )
         )
-        self.extractAttachments(metadata_lst)
-        
+        for file in filter(
+            lambda f: f.path in self.editedFiles,
+            Chat.extractAttachments(metadata_lst)
+        ):
+            self.files[file.path].insert(0, file)
         
     def render(self):
         return map(
@@ -173,7 +173,7 @@ class VariableData:
 
 class Request:
     @staticmethod
-    def get_model(responseId):
+    def getModel(responseId):
         try:
             coll = ArangoClient("http://localhost:8529").db().collection("chat-ids")
             cursor = coll.find({"request_id": responseId}, skip=0, limit=1)
@@ -184,7 +184,7 @@ class Request:
     
     def __init__(self, doc):
         self.responseId = doc["result"]["metadata"]["responseId"]
-        self.model = self.get_model(self.responseId)
+        self.model = Request.getModel(self.responseId)
         self.modes = doc["agent"]["modes"]
         self.message = doc["message"]["text"]
         self.response = Response(doc["response"])
@@ -209,7 +209,7 @@ class Request:
                     "```diff",
                     unified_diff(lst[0].buffer, lst[-1].buffer, lineterm=""),
                     "```"
-                ] for path, lst in Chat.files.items() if len(lst) > 1
+                ] for path, lst in Chat.instance.files.items() if len(lst) > 1
             )
         ]
     
@@ -223,9 +223,10 @@ class Response:
             kind = chunk.get("kind", None)
             #tool invocation
             if kind=="toolInvocationSerialized":
-                if chunk["toolId"] == "copilot_insertEdit":
+                toolId = chunk["toolId"]
+                if toolId in ["copilot_insertEdit", "copilot_replaceString"]:
                     it.enqueue(chunk)
-                    obj = ToolInsertEdit(it)
+                    obj = ToolEdit(it)
                 
             #text block
             elif (
@@ -271,7 +272,7 @@ class TextChunk:
     def render(self):
         return self.text
 
-class ToolInsertEdit:
+class ToolEdit:
     @staticmethod
     def getFileEdits(chunks):
         return filter(
@@ -293,25 +294,37 @@ class ToolInsertEdit:
             Chat.instance.editedFiles.add(
                 fileEdit["uri"]["path"]
             )
-            
-        # self.fileEdits = []
-
-        # for fileEdit in editGroups:
-        #     path = fileEdit["uri"]["path"]
-        #     lst = Chat.files[path]
-        #     lst.append(File.from_editList(
-        #         path = path,
-        #         editList= fileEdit["edits"]
-        #     ))
-        #     self.fileEdits.append((path, len(lst)-1))        
 
     def render(self):
+        editedFiles = {}
         for fileEdit in self.getFileEdits(self.chunks):
             path = fileEdit["uri"]["path"]
-            fileVersions = Chat.instance.files[path]
-            prev = fileVersions[-1] if fileVersions else None
-            file = File.copy(prev) if prev else File(path)
+            file = editedFiles.get(path, None)
+            if file is None:
+                fileVersions = Chat.instance.files[path]
+                prev = fileVersions[-1] if fileVersions else None
+                file = File.copy(prev) if prev else File(path)
             file.applyEdits(fileEdit["edits"])
+        
+        for path, file in editedFiles.items():
+            fileVersions = Chat.instance.files[path]
+            yield f"Edited `{os.path.basename(path)}`"
+            prev = fileVersions[-1] if fileVersions else None
+            if prev:
+                yield from [
+                    "<details>",
+                    "```diff",
+                    unified_diff(
+                        prev.buffer,
+                        file.buffer,
+                        lineterm="",
+                        fromfile="before",
+                        tofile="after"
+                    ),
+                    "```",
+                    "</details>"
+                ]
+            fileVersions.append(file)
 
 class InlineReference:
     def __init__(self, doc):

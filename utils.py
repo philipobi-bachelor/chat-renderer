@@ -16,7 +16,6 @@ class flatten(Iterator):
             obj = next(self.its[-1])
             if isinstance(obj, Iterable) and not type(obj) == str:
                 self.its.append(iter(obj))
-                return next(self)
             else:
                 return obj
         except StopIteration:
