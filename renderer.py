@@ -1,19 +1,19 @@
 import xml.etree.ElementTree as ET
 from collections import defaultdict
-from utils import flatten, buffered
+from utils import flatten, buffered, MatchedFilter, Matcher
 import re
 from difflib import unified_diff
 from arango import ArangoClient
 from operator import itemgetter
 import os.path
+from abc import ABC, abstractmethod
+from markdown import Document, Text, BlockquoteTag, CodeBlock, Details, Wrapper
 
 class DB:
     @staticmethod
     def getDocument(coll, key):
         coll = ArangoClient("http://localhost:8529").db().collection(coll)
         return coll.get(key)
-        
-
 
 class File:
     def __init__(self, path, buffer = []):
@@ -40,11 +40,11 @@ class File:
         ):
             line = buffer[i-1]
             if startLineNumber == endLineNumber:
-                buffer[i-1] = line[:startColumn] + string + line[endColumn:]
+                buffer[i-1] = line[:startColumn-1] + string + line[endColumn-1:]
             elif i == startLineNumber: 
-                buffer[i-1] = line[:startColumn] + string
+                buffer[i-1] = line[:startColumn-1] + string
             elif i == endLineNumber:
-                buffer[i-1] = string + line[endColumn:]
+                buffer[i-1] = string + line[endColumn-1:]
             else: 
                 buffer[i-1] = string
 
@@ -84,7 +84,26 @@ class File:
                 strings=lineEdits
             )
 
-class Chat: 
+class Node:
+    @abstractmethod
+    def build(self):
+        pass
+
+class Container(Node):
+    def __init__(self, *content, content_it=None):
+        self.content = content or content_it
+
+    def buildContent(self):
+        return map(
+            lambda item: item.build(),
+            self.content
+        )
+    
+    def build(self):
+        return Wrapper(content_it=self.buildContent())
+        
+
+class Chat(Container): 
     instance = None   
     
     @classmethod
@@ -131,7 +150,10 @@ class Chat:
         self.responderUsername = doc["responderUsername"]
         self.files = defaultdict(list)
         self.editedFiles = set()
-        self.requests = [Request(req) for req in doc["requests"]]
+
+        super().__init__(
+            content_it=[Request(req) for req in doc["requests"]]
+        )
         
         metadata_lst = (
             metadata
@@ -148,16 +170,9 @@ class Chat:
         ):
             self.files[file.path].insert(0, file)
         
-    def render(self):
-        return map(
-            lambda line: line + "\n",
-            flatten(
-                map(
-                    lambda req: req.render(),
-                    self.requests
-                )
-            )
-        )
+    
+    def build(self):
+        return Document(content_it=self.buildContent())
      
 class VariableData:
     def __init__(self, doc):
@@ -171,7 +186,7 @@ class VariableData:
     def render(self):
         return ", ".join(self.variables)
 
-class Request:
+class Request(Container):
     @staticmethod
     def getModel(responseId):
         try:
@@ -182,51 +197,46 @@ class Request:
         except:
             return None
     
-    def __init__(self, doc):
-        self.responseId = doc["result"]["metadata"]["responseId"]
+    def __init__(self, request):
+        
+        self.responseId = request["result"]["metadata"]["responseId"]
         self.model = Request.getModel(self.responseId)
-        self.modes = doc["agent"]["modes"]
-        self.message = doc["message"]["text"]
-        self.response = Response(doc["response"])
-        self.variableData = VariableData(doc["variableData"])
-
-    def render(self):
-        return [
-            map(
-                lambda s: s + "\n",
-                [
-                    f"> {Chat.instance.requesterUsername}:",
-                    self.message,
-                    *([s] if (s:=self.variableData.render()) else []),
-                    "",
-                    "> " + Chat.instance.responderUsername + (f" ({self.model})" if self.model else "") + ':'   
-                ]
-            ),
-            self.response.render(),
-            (
-                [
-                    f"Edited file `{path}`",
-                    "```diff",
-                    unified_diff(lst[0].buffer, lst[-1].buffer, lineterm=""),
-                    "```"
-                ] for path, lst in Chat.instance.files.items() if len(lst) > 1
-            )
-        ]
+        self.modes = request["agent"]["modes"]
+        self.message = request["message"]["text"]
+        self.response = Response(request["response"])
+        self.variableData = VariableData(request["variableData"])
+        
+        super().__init__(self.response)
     
-class Response:
-    def __init__(self, lst):
-        self.chunks = []
+    def build(self):
+        return Wrapper(
+            BlockquoteTag(Text(Text.Text(Chat.instance.requesterUsername))),
+            Text(Text.Text(self.message)),
+            BlockquoteTag(Text(Text.Text(
+                Chat.instance.responderUsername + (f" ({self.model}):" if self.model else ":")
+            ))),
+            *self.buildContent()
+        )
+    
+class Response(Container):
+    @staticmethod
+    def processChunks(lst):
         it = buffered(lst)
         for chunk in it:
             obj = None
             
             kind = chunk.get("kind", None)
-            #tool invocation
-            if kind=="toolInvocationSerialized":
-                toolId = chunk["toolId"]
-                if toolId in ["copilot_insertEdit", "copilot_replaceString"]:
-                    it.enqueue(chunk)
-                    obj = ToolEdit(it)
+            if kind is not None:
+                if kind == "prepareToolInvocation": continue
+                #tool invocation
+                elif kind=="toolInvocationSerialized":
+                    toolId = chunk["toolId"]
+                    if toolId == "copilot_insertEdit":
+                        it.enqueue(chunk)
+                        obj = ToolInsertEdit(it)
+                    elif toolId == "copilot_replaceString":
+                        it.enqueue(chunk)
+                        obj = ToolReplaceString(it)
                 
             #text block
             elif (
@@ -237,64 +247,75 @@ class Response:
                 obj = TextBlock(it)
             
             if obj:
-                self.chunks.append(obj)
+                yield obj
             else:
                 print(f"Unknown chunk encountered:\n{chunk}")
+   
+    def __init__(self, lst):
+        super().__init__(*self.processChunks(lst))
     
-    def render(self):
-        return map(lambda chunk: chunk.render(), self.chunks)
-
-class TextBlock:
+class TextBlock(Container):
     def __init__(self, it):
-        self.chunks = []
+        chunks = []
         for chunk in it:
             kind = chunk.get("kind", None)
             if kind == "inlineReference":
-                self.chunks.append(InlineReference(chunk))
+                chunks.append(InlineReference(chunk))
             elif "value" in chunk and kind is None:
-                self.chunks.append(TextChunk(chunk))
+                chunks.append(TextChunk(chunk))
             else:
                 it.enqueue(chunk)
                 break
+        super().__init__(content_it=chunks)
 
-    def render(self):
-        return (
-            ''.join( 
-                map(
-                    lambda chunk: chunk.render(),
-                    self.chunks
-                ))
-            ).splitlines()
+    def build(self):
+        return Text(content_it=self.buildContent())
         
-class TextChunk:
+class TextChunk(Node):
     def __init__(self, doc):
         self.text = doc["value"]
-    def render(self):
-        return self.text
+    def build(self):
+        return Text.Text(self.text)
 
-class ToolEdit:
+class InlineReference(Node):
+    def __init__(self, doc):
+        ref = doc["inlineReference"]
+        self.text = ""
+        #file reference
+        if "path" in ref:
+            self.text = ref["path"]
+        #symbol reference
+        elif "name" in ref:
+            self.text =ref["name"]
+        
+    def build(self):
+        return Text.Code(self.text)
+
+
+class ToolEdit(ABC):
     @staticmethod
     def getFileEdits(chunks):
         return filter(
             lambda chunk: chunk.get("kind", None) == "textEditGroup",
             chunks
         )
-
+    
+    @staticmethod
+    @abstractmethod
+    def makeChunks(it:buffered):
+        pass
+    
     def __init__(self, it):
-        self.chunks = []
-        for chunk in it:
-            self.chunks.append(chunk)
-            if (
-                chunk.get("kind", None) == "textEditGroup" and
-                chunk["done"] == True
-            ): 
-                break
+        self.chunks = self.makeChunks(it)
 
         for fileEdit in self.getFileEdits(self.chunks):
             Chat.instance.editedFiles.add(
                 fileEdit["uri"]["path"]
             )
 
+    def build(self):
+        return Wrapper()
+    
     def render(self):
         editedFiles = {}
         for fileEdit in self.getFileEdits(self.chunks):
@@ -305,37 +326,70 @@ class ToolEdit:
                 prev = fileVersions[-1] if fileVersions else None
                 file = File.copy(prev) if prev else File(path)
             file.applyEdits(fileEdit["edits"])
+            editedFiles[path] = file
         
         for path, file in editedFiles.items():
             fileVersions = Chat.instance.files[path]
-            yield f"Edited `{os.path.basename(path)}`"
+            yield f"> Edited `{os.path.basename(path)}`"
             prev = fileVersions[-1] if fileVersions else None
             if prev:
-                yield from [
-                    "<details>",
-                    "```diff",
-                    unified_diff(
-                        prev.buffer,
-                        file.buffer,
-                        lineterm="",
-                        fromfile="before",
-                        tofile="after"
-                    ),
-                    "```",
-                    "</details>"
-                ]
+                yield from map(
+                    lambda s: "> " + s,
+                    flatten([
+                        "<details>\n",
+                        "```diff",
+                        unified_diff(
+                            prev.buffer,
+                            file.buffer,
+                            lineterm="",
+                            fromfile="before",
+                            tofile="after"
+                        ),
+                        "```",
+                        "</details>"
+                    ])
+                )
             fileVersions.append(file)
 
-class InlineReference:
-    def __init__(self, doc):
-        ref = doc["inlineReference"]
-        self.text = ""
-        #file reference
-        if "path" in ref:
-            self.text = "file `" + ref["path"] + '`'
-        #symbol reference
-        elif "name" in ref:
-            self.text = '`' + ref["name"] + '`'
+class ToolInsertEdit(ToolEdit):
+    @staticmethod
+    def makeChunks(it: buffered):
+        matchedFilter = MatchedFilter(
+            it,
+            (
+                Matcher(lambda c: c.get("toolId", "") == "copilot_insertEdit"),
+                Matcher(lambda c: c.get("toolId", "") == "vscode_editFile_internal"),
+                Matcher(lambda c: c.get("value", "") == "\n````\n"),
+                Matcher(lambda c: c.get("kind", "") == "undoStop"),
+                Matcher(lambda c: c.get("kind", "") == "codeblockUri"),
+                Matcher(lambda c: c.get("value", "") == "\n````\n"),
+                Matcher(lambda c: c.get("kind", "") == "textEditGroup", n=-1)
+            )
+        )
+        chunks = list(matchedFilter)
+        if matchedFilter.error:
+            print("Error extracting copilot_insertEdit information")
+            print(matchedFilter.errorObj)
+        return chunks
+
+class ToolReplaceString(ToolEdit):
+    @staticmethod
+    def makeChunks(it:buffered):
+        matchedFilter = MatchedFilter(
+            it,
+            (
+                Matcher(lambda c: c.get("toolId", "") == "copilot_replaceString"),
+                Matcher(lambda c: c.get("value", "") == "\n```\n"),
+                Matcher(lambda c: c.get("kind", "") == "undoStop"),
+                Matcher(lambda c: c.get("kind", "") == "codeblockUri"),
+                Matcher(lambda c: c.get("kind", "") == "textEditGroup", n=-1),
+                Matcher(lambda c: c.get("value", "") == "\n```\n"),
+            )
+        )
+        chunks = list(matchedFilter)
+        if matchedFilter.error:
+            print("Error extracting copilot_replaceString information")
+            print(matchedFilter.errorObj)
+        return chunks
         
-    def render(self):
-        return self.text
+
