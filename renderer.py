@@ -1,14 +1,13 @@
-import xml.etree.ElementTree as ET
-from collections import defaultdict
-from utils import Join, Buffered, MatchedFilter, Matcher
 import re
+import xml.etree.ElementTree as ET
+from collections import defaultdict, deque
 from difflib import unified_diff
 from arango import ArangoClient
 from operator import itemgetter
 from abc import ABC, abstractmethod
-from markdown import Document, Text, BlockquoteTag, CodeBlock, Details, Wrapper
-from collections import deque
 from pathlib import PurePath
+from .utils import Join, Buffered, MatchedFilter, Matcher
+from .markdown import Document, Text, BlockquoteTag, CodeBlock, Details, Wrapper
 
 def unpackRange(range):
     return itemgetter(
