@@ -5,9 +5,8 @@ import re
 from difflib import unified_diff
 from arango import ArangoClient
 from operator import itemgetter
-import os.path
 from abc import ABC, abstractmethod
-from markdown import Document, Text, BlockquoteTag, CodeBlock, Details, Wrapper, Box
+from markdown import Document, Text, BlockquoteTag, CodeBlock, Details, Wrapper
 from collections import deque
 from pathlib import PurePath
 
@@ -18,6 +17,14 @@ def unpackRange(range):
         "endLineNumber",
         "endColumn"
     )(range)
+
+def fmtDuration(durationMs):
+    durationS = durationMs/1000
+    nMin, nSec = (int(durationS/60), durationS%60)
+    output = ""
+    if nMin > 0: output += f"{nMin} min, "
+    output += f"{nSec:.3f} s"
+    return output
 
 class DB:
     @staticmethod
@@ -35,13 +42,17 @@ class Path:
     ]
 
     @classmethod
-    def relative(cls, path:PurePath):
+    def splitRoot(cls, path:PurePath):
         result = None
         for root in cls.roots:
             try: relpath = path.relative_to(root)
             except ValueError: continue
             result = relpath
         return result or path
+    
+    @classmethod
+    def format(cls, pathStr:str):
+        return str(cls.splitRoot(PurePath(pathStr)))
 
 class File:
     def __init__(self, buffer = None):
@@ -81,18 +92,17 @@ class File:
             text = edit["text"]
             (startLineNumber, startColumn, endLineNumber, endColumn) = unpackRange(edit["range"])
             
-            lineEdits = []
-
             if startLineNumber == endLineNumber: 
-                text = text.replace('\n', '')
-                lineEdits = [text]
-                if len(text) > endColumn - startColumn:
-                    endColumn = startColumn + len(text)
-            else:
-                lineEdits = text.splitlines()
+                text = text.lstrip("\n")
             
-            if endColumn == 1 and len(lineEdits[-1]) > 0:
-                endColumn = len(lineEdits[-1]) + 1
+            lineEdits = text.split('\n')
+            
+            if (nChars := len(lineEdits[-1])) > endColumn - startColumn:
+                endColumn = startColumn + nChars
+            else:
+                lineEdits = text.split('\n')
+            
+            endLineNumber = startLineNumber + len(lineEdits) - 1
 
             self.insert(
                 start=(startLineNumber, startColumn), 
@@ -121,86 +131,38 @@ class Container(Node):
 
 class Chat(Container): 
     instance = None   
-    
-    @classmethod
-    def fromKey(cls, key):
-        return cls(DB.getDocument("chat-logs", key))
-    
-    @staticmethod
-    def extractAttachments(metadata_lst):
-        for text in (
-            txt
-            for meta in metadata_lst if (msgs:=meta.get("renderedUserMessage", []))
-                for msg in msgs if (txt:=msg.get("text", ""))
-        ):
-            # wrap attachment contents to avoid parser errors
-            text = re.sub(
-                r"(?P<tag_open><attachment [^>]*>)(?P<tag_content>[\s\S]*?)(?P<tag_close><\/attachment>)",
-                r"\g<tag_open><![CDATA[\g<tag_content>]]>\g<tag_close>",
-                text
-            )
-            text = "<root>" + text + "</root>"
-            try: root = ET.fromstring(text)
-            except ET.ParseError as e:
-                print("Error parsing attachments:")
-                print(e)
-                with open("attachment.txt", "w") as f:
-                    f.write(text)
-                continue
 
-            for attachment in root.findall(".//attachment"):
-                filePath = attachment.attrib.get("filePath", None)
-                if filePath is not None:
-                    text = attachment.text
-                    text = re.sub(r"\s*```\S*\s*", "", text)
-                    yield File(
-                        path = filePath,
-                        buffer = text.splitlines()
-                    )
-                else:
-                    print(f"Encountered unknown attachment\n{attachment}")
-
-    def __init__(self, doc):
+    def __init__(self, doc, header=None):
         Chat.instance = self
+        self.header = header
         self.requesterUsername = doc["requesterUsername"]
         self.responderUsername = doc["responderUsername"]
         self.files = defaultdict(list)
         self.requestedFiles = set()
 
-        super().__init__(
-            content_it=[Request(req) for req in doc["requests"]]
-        )
-        
-        metadata_lst = (
-            metadata
-            for request in doc.get("requests", [])
-            if (
-                metadata:=request
-                .get("result", {})
-                .get("metadata", {})
-            )
-        )
-        for file in filter(
-            lambda f: f.path in self.requestedFiles,
-            Chat.extractAttachments(metadata_lst)
-        ):
-            self.files[file.path].insert(0, file)
-        
+        super().__init__(content_it=[Request(req) for req in doc["requests"]])
+
+        for path in self.requestedFiles:
+            try:
+                with open(path, "r") as f:
+                   content = f.read()
+                   self.files[path].insert(0, File(buffer=content.split('\n'))) 
+            except FileNotFoundError:
+                print("Could not find requested file " + path)
+                continue
     
+    @classmethod
+    def fromKey(cls, key):
+        return cls(
+            doc = DB.getDocument("chat-logs", key), 
+            header = Text(Text.Text("Document ID: "), Text.Code(f"chat-logs/{key}"))
+        )
+
     def build(self):
-        return Document(content_it=self.buildContent())
-     
-class VariableData:
-    def __init__(self, doc):
-        self.variables = []
-        for var in doc["variables"]:
-            kind = doc.get("kind", None)
-            if kind == "file":
-                self.variables.append(f"file: `{doc['name']}`")
-            else:
-                print(f"Unknown variable encountered:\n{doc}")
-    def render(self):
-        return ", ".join(self.variables)
+        return Document(
+            self.header,
+            Wrapper(content_it=self.buildContent())
+        )
 
 class Request(Container):
     @staticmethod
@@ -215,12 +177,12 @@ class Request(Container):
     
     def __init__(self, request):
         
-        self.responseId = request["result"]["metadata"]["responseId"]
-        self.model = Request.getModel(self.responseId)
-        self.modes = request["agent"]["modes"]
+        result = request["result"]
+        responseId = result["metadata"]["responseId"]
+        self.model = Request.getModel(responseId)
+        self.timeMs = result["timings"]["totalElapsed"]
         self.message = request["message"]["text"]
         self.response = Response(request["response"])
-        self.variableData = VariableData(request["variableData"])
         
         super().__init__(self.response)
     
@@ -234,10 +196,11 @@ class Request(Container):
             ),
             BlockquoteTag(
                 Text(Text.Heading(
-                    level = 4,
-                    content = Chat.instance.responderUsername + (f" ({self.model}):" if self.model else ":")
+                        level = 4,
+                        content = Chat.instance.responderUsername + (f" ({self.model}):" if self.model else ":")
                 )),
-                Wrapper(content_it=self.buildContent())
+                Wrapper(content_it=self.buildContent()),
+                Text(Text.Code(f"({fmtDuration(self.timeMs)})"))
             )
         )
     
@@ -249,34 +212,36 @@ class Response(Container):
             obj = None
             
             kind = chunk.get("kind", None)
-            if kind is not None:
-                if kind == "prepareToolInvocation": continue
-                #tool invocation
-                elif kind=="toolInvocationSerialized":
-                    toolId = chunk["toolId"]
-                    match toolId:
-                        case "copilot_insertEdit":
-                            it.enqueue(chunk)
-                            obj = ToolInsertEdit(it)
-                        case "copilot_replaceString":
-                            it.enqueue(chunk)
-                            obj = ToolReplaceString(it)
-                        case "copilot_readFile":
-                            obj = ToolReadFile(chunk)
-                        case "copilot_findTextInFiles":
-                            obj = ToolFindTextInFiles(chunk)
-                        case "copilot_findFiles":
-                            obj = ToolFindFiles(chunk)
-                        case "copilot_getErrors":
-                            obj = ToolGetErrors(chunk)
-                    
+            
             #text block
-            elif (
+            if (
                 ("value" in chunk and kind is None) or
                 kind == "inlineReference"
             ):
                 it.enqueue(chunk)
                 obj = ResponseText(it)
+            elif kind is not None:
+                match kind:
+                    case "prepareToolInvocation": continue
+                    case "confirmation":
+                        obj = Confirmation(chunk)      
+                    case "toolInvocationSerialized":
+                        toolId = chunk["toolId"]
+                        match toolId:
+                            case "copilot_insertEdit":
+                                it.enqueue(chunk)
+                                obj = ToolInsertEdit(it)
+                            case "copilot_replaceString":
+                                it.enqueue(chunk)
+                                obj = ToolReplaceString(it)
+                            case "copilot_readFile":
+                                obj = ToolReadFile(chunk)
+                            case "copilot_findTextInFiles":
+                                obj = ToolFindTextInFiles(chunk)
+                            case "copilot_findFiles":
+                                obj = ToolFindFiles(chunk)
+                            case "copilot_getErrors":
+                                obj = ToolGetErrors(chunk)
             
             if obj:
                 yield obj
@@ -285,7 +250,16 @@ class Response(Container):
    
     def __init__(self, lst):
         super().__init__(*self.processChunks(lst))
-    
+
+class Confirmation(Node):
+    def __init__(self, doc):
+        self.message = doc["message"]
+
+    def build(self):
+        return BlockquoteTag(Text(
+            Text.Text(self.message)
+        ))
+
 class ResponseText(Container):
     class Text(Node):
         def __init__(self, doc):
@@ -307,11 +281,10 @@ class ResponseText(Container):
                 self.text = self.ref["name"]
             
         def build(self):
-            return Text.Code(
-                os.path.basename(self.text) 
-                if self.kind == "path" 
-                else self.text
-            )
+            if self.kind == "path":
+                return Text.Code(Path.format(self.text))
+            else:
+                return Text.Code(self.text)
 
     def __init__(self, it):
         chunks = []
@@ -375,8 +348,7 @@ class MessageNode(Node):
         self.message = self.messageObj["value"]
 
     def replaceUriLinks(self, message):
-        fmt = lambda obj : os.path.basename(obj["path"])
-        repl = lambda match : f"`{fmt(self.messageObj["uris"][match.group('uri')])}`"
+        repl = lambda match : f"`{Path.format(self.messageObj["uris"][match.group('uri')]["path"])}`"
         pattern = r"\[\]\((?P<uri>[^)]*)\)"
         return re.sub(pattern, repl, message)
 
@@ -395,8 +367,8 @@ class ToolFindTextInFiles(Container):
     def buildContent(self):
         def func(result):
             sl, sc, el, ec = unpackRange(result["range"])
-            fname = os.path.basename(result["uri"]["path"])
-            return Text.Code(f"{fname}:{sl}:{sc}-{el}:{ec}")
+            path = Path.format(result["uri"]["path"])
+            return Text.Code(f"{path}:{sl}:{sc}-{el}:{ec}")
             
         return Join(
             map(func, self.resultDetails),
@@ -406,11 +378,7 @@ class ToolFindTextInFiles(Container):
     def build(self):
         return BlockquoteTag(
             Text(Text.Text(self.message)),
-            *(
-                [Details(Text(content_it=self.buildContent()))]
-                if self.resultDetails
-                else []
-            )
+            Details(Text(content_it=self.buildContent())) if self.resultDetails else None
         )
 
 class ToolFindFiles(Node):
@@ -421,13 +389,12 @@ class ToolFindFiles(Node):
     def build(self):
         return BlockquoteTag(
             Text(Text.Text(self.message)),
-            *([Details(Text(
+            Details(Text(
                 content_it=Join(
-                    (Text.Code(os.path.basename(result["path"])) for result in self.resultDetails),
+                    (Text.Code(Path.format(result["path"])) for result in self.resultDetails),
                     Text.Linebreak()
                 )
-            ))] 
-            if self.resultDetails else [])
+            )) if self.resultDetails else None
         )
 
 class ToolGetErrors(MessageNode):
@@ -464,7 +431,7 @@ class ToolEdit(Container):
         
         for path, file in editedFiles.items():
             fileVersions = Chat.instance.files[path]
-            yield Text(Text.Text("Edited "), Text.Code(os.path.basename(path)))
+            yield Text(Text.Text("Edited "), Text.Code(Path.format(path)))
             prev = fileVersions[-1] if fileVersions else None
             if prev is not None:
                 diffLines = list(
@@ -509,7 +476,7 @@ class ToolInsertEdit(ToolEdit):
         editedFiles = {}
         for fileEdit in self.getFileEdits(self.chunks):
             path = fileEdit["uri"]["path"]
-            file = File(path)
+            file = File()
             file.applyEdits(fileEdit["edits"])
             editedFiles[path] = file
         return editedFiles
@@ -542,7 +509,7 @@ class ToolReplaceString(ToolEdit):
             if file is None:
                 fileVersions = Chat.instance.files[path]
                 prev = fileVersions[-1] if fileVersions else None
-                file = File.copy(prev) if prev else File(path)
+                file = File.copy(prev) if prev else File()
             file.applyEdits(fileEdit["edits"])
             editedFiles[path] = file
         return editedFiles

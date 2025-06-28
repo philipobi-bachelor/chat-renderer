@@ -7,7 +7,10 @@ class Node(ABC):
 
 class Container(Node):
     def __init__(self, *content, content_it=None):
-        self.content = content or content_it
+        self.content = filter(
+            lambda item: item is not None,
+            content or content_it
+        )
 
     def flattenContent(self):
         return (
