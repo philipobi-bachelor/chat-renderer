@@ -1,5 +1,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
+from collections import deque
+
 class Iterator(ABC):
     @abstractmethod
     def __next__(self):
@@ -7,7 +9,7 @@ class Iterator(ABC):
     def __iter__(self):
         return self
 
-class flatten(Iterator):
+class Flatten(Iterator):
     def __init__(self, it):
         self.its = [iter(it)]
 
@@ -23,7 +25,7 @@ class flatten(Iterator):
             if not self.its: raise
         return next(self)
 
-class buffered(Iterator):
+class Buffered(Iterator):
     def __init__(self, it):
         self.it = iter(it)
         self.queue = []
@@ -47,7 +49,7 @@ class Matcher:
         return matched
     
 class MatchedFilter(Iterator):
-    def __init__(self, it: buffered, matchers):
+    def __init__(self, it: Buffered, matchers):
         self.it = iter(it)
         self.matchers = iter(matchers)
         self.matcher = None
@@ -69,3 +71,22 @@ class MatchedFilter(Iterator):
             else:
                 self.matcher = None
                 return next(self)
+
+class Join(Iterator):
+    def __init__(self, it, fillObj):
+        self.it = iter(it)
+        self.fillObj = fillObj
+        self.deque = deque()
+
+    def __next__(self):
+        nItems = len(self.deque)
+        if nItems == 0:
+            obj = next(self.it)
+            try: obj1 = next(self.it)
+            except StopIteration: return obj
+            self.deque.extend([obj, self.fillObj, obj1])
+        elif nItems == 1:
+            try: obj = next(self.it)
+            except StopIteration: return self.deque.popleft()
+            self.deque.extend([self.fillObj, obj])
+        return self.deque.popleft()

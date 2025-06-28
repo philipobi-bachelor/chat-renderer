@@ -61,8 +61,19 @@ class BlockquoteTag(Container):
         yield "</blockquote>"
         yield ""
 
+class Box(Container):
+    def render(self):
+        if self.content is None:
+            yield ""
+            return 
+        yield "<table><tr><td>"
+        lines = list(self.renderContent())
+        yield from lines[:-1]
+        yield lines[-1] + " </td>"
+        yield "</tr></table>"
+        
 class Text(Container):
-    class TextChunk(ABC):
+    class TextElement(ABC):
         def __init__(self, content=""):
             self.content = content
         
@@ -70,7 +81,7 @@ class Text(Container):
         def render(self):
             pass
 
-    class Linebreak(TextChunk):
+    class Linebreak(TextElement):
         instance = None
         def __new__(cls):
             if cls.instance is None:
@@ -80,13 +91,31 @@ class Text(Container):
         def render(self):
             pass
     
-    class Text(TextChunk):
+    class Text(TextElement):
+        def __init__(self, content="", bold=False, italic=False):
+            super().__init__(content)
+            self.bold = bold
+            self.italic = italic
         def render(self):
+            if self.bold: self.content = "**" + self.content + "**"
+            if self.italic: self.content = "_" + self.content + "_"
             return self.content
         
-    class Code(TextChunk):
+    class Code(TextElement):
         def render(self):
             return f"`{self.content}`"
+
+    class Heading(TextElement):
+        def __init__(self, level=1, content=""):
+            self.level = level
+            super().__init__(content)
+        
+        def render(self):
+            prefix = "#"*self.level + " "
+            if isinstance(self.content, Text.TextElement):
+                return prefix + self.content.render()
+            else:
+                return prefix + self.content
 
     def renderContent(self):
         line = ""
@@ -94,6 +123,10 @@ class Text(Container):
             if type(chunk) == Text.Linebreak:
                 line += "  "
                 yield line
+                line = ""
+            elif type(chunk) == Text.Heading:
+                if line: yield line
+                yield chunk.render()
                 line = ""
             else:
                 line += chunk.render()
