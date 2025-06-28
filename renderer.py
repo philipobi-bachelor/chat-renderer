@@ -41,18 +41,22 @@ class Path:
         root / "basf2-v2",
     ]
 
-    @classmethod
-    def splitRoot(cls, path:PurePath):
+    @staticmethod
+    def splitRoot(path:PurePath):
         result = None
-        for root in cls.roots:
+        for root in Path.roots:
             try: relpath = path.relative_to(root)
             except ValueError: continue
             result = relpath
         return result or path
     
-    @classmethod
-    def format(cls, pathStr:str):
-        return str(cls.splitRoot(PurePath(pathStr)))
+    @staticmethod
+    def format(pathStr:str):
+        return str(Path.splitRoot(PurePath(pathStr)))
+
+    @staticmethod
+    def resolve(pathStr):
+        return pathStr
 
 class File:
     def __init__(self, buffer = None):
@@ -128,7 +132,6 @@ class Container(Node):
     def build(self):
         return Wrapper(content_it=self.buildContent())
         
-
 class Chat(Container): 
     instance = None   
 
@@ -144,7 +147,7 @@ class Chat(Container):
 
         for path in self.requestedFiles:
             try:
-                with open(path, "r") as f:
+                with open(Path.resolve(path), "r") as f:
                    content = f.read()
                    self.files[path].insert(0, File(buffer=content.split('\n'))) 
             except FileNotFoundError:
