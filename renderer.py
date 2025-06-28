@@ -8,6 +8,8 @@ from operator import itemgetter
 import os.path
 from abc import ABC, abstractmethod
 from markdown import Document, Text, BlockquoteTag, CodeBlock, Details, Wrapper, Box
+from collections import deque
+from pathlib import PurePath
 
 def unpackRange(range):
     return itemgetter(
@@ -23,17 +25,31 @@ class DB:
         coll = ArangoClient("http://localhost:8529").db().collection(coll)
         return coll.get(key)
 
+class Path:
+    root = PurePath("/project/agkuhr/users/pobi/b2")
+    roots = [
+        root,
+        root / "basf2",
+        root / "basf2-v1",
+        root / "basf2-v2",
+    ]
+
+    @classmethod
+    def relative(cls, path:PurePath):
+        result = None
+        for root in cls.roots:
+            try: relpath = path.relative_to(root)
+            except ValueError: continue
+            result = relpath
+        return result or path
+
 class File:
-    def __init__(self, path, buffer = []):
-        self.path = path
-        self.buffer = buffer
+    def __init__(self, buffer = None):
+        self.buffer = buffer or []
 
     @classmethod
     def copy(cls, original):
-        return cls(
-            path = original.path,
-            buffer = original.buffer.copy() 
-        )
+        return cls(original.buffer.copy())
     
     def insert(self, start, end, strings):
         buffer = self.buffer
@@ -84,7 +100,7 @@ class File:
                 strings=lineEdits
             )
 
-class Node:
+class Node(ABC):
     @abstractmethod
     def build(self):
         pass
@@ -92,7 +108,7 @@ class Node:
 class Container(Node):
     def __init__(self, *content, content_it=None):
         self.content = content or content_it
-
+    
     def buildContent(self):
         return map(
             lambda item: item.build(),
@@ -279,17 +295,23 @@ class ResponseText(Container):
         
     class InlineReference(Node):
         def __init__(self, doc):
-            ref = doc["inlineReference"]
+            self.ref = doc["inlineReference"]
+            self.kind = None
             self.text = ""
             #file reference
-            if "path" in ref:
-                self.text = ref["path"]
+            if "path" in self.ref:
+                self.kind = "path"
+                self.text = self.ref["path"]
             #symbol reference
-            elif "name" in ref:
-                self.text =ref["name"]
+            elif "name" in self.ref:
+                self.text = self.ref["name"]
             
         def build(self):
-            return Text.Code(self.text)
+            return Text.Code(
+                os.path.basename(self.text) 
+                if self.kind == "path" 
+                else self.text
+            )
 
     def __init__(self, it):
         chunks = []
@@ -304,22 +326,67 @@ class ResponseText(Container):
                 break
         super().__init__(content_it=chunks)
 
+    @staticmethod    
+    def fixInlineRefs(it):
+        it = iter(it)
+        def fix(buffer):
+            [obj, ref, obj1] = buffer
+            
+            if not isinstance(obj, ResponseText.Text): return
+            
+            inCode = False
+            txt = obj
+            for _ in filter(lambda c: c=='`', txt.text): inCode ^= True
+            
+            if not inCode: return
+
+            [txt.text, code] = txt.text.rsplit('`', 1)
+            txt1 = obj1
+            [code1, txt1.text] = txt1.text.split('`', 1)
+            
+            buffer[1] = ResponseText.Text({"value": '`' + code + ref.text + code1 + '`'})
+    
+        buffer = deque(maxlen=3)
+        try:
+            while True:
+                while len(buffer) < 3: buffer.append(next(it))
+                iInlineRef = -1
+                for i, item in enumerate(buffer):
+                    if isinstance(item, ResponseText.InlineReference):
+                        iInlineRef = i
+                        break
+                if iInlineRef == 1:
+                    fix(buffer)
+                    yield buffer.popleft()
+                    yield buffer.popleft()
+                else:
+                    yield buffer.popleft()
+        except StopIteration:
+            yield from buffer
+            buffer.clear()
+
     def build(self):
+        self.content = list(self.fixInlineRefs(self.content))
         return Text(content_it=self.buildContent())
 
-class ToolReadFile(Node):
+class MessageNode(Node):
     def __init__(self, doc):
-        self.files = doc["pastTenseMessage"]["uris"].values() 
-    def build(self):
-        return Wrapper(
-            content_it=(
-                BlockquoteTag(Text(
-                    Text.Text("Read "), Text.Code(os.path.basename(file["path"]))
-                )) for file in self.files
-            )
-        )
-        
+        self.messageObj = doc["pastTenseMessage"]
+        self.message = self.messageObj["value"]
 
+    def replaceUriLinks(self, message):
+        fmt = lambda obj : os.path.basename(obj["path"])
+        repl = lambda match : f"`{fmt(self.messageObj["uris"][match.group('uri')])}`"
+        pattern = r"\[\]\((?P<uri>[^)]*)\)"
+        return re.sub(pattern, repl, message)
+
+    def build(self):
+        self.message = self.replaceUriLinks(self.message)
+        return BlockquoteTag(Text(Text.Text(self.message)))
+
+class ToolReadFile(MessageNode):
+    pass        
+        
 class ToolFindTextInFiles(Container):
     def __init__(self, doc):
         self.message = doc["pastTenseMessage"]["value"]
@@ -363,20 +430,8 @@ class ToolFindFiles(Node):
             if self.resultDetails else [])
         )
 
-class ToolGetErrors(Node):
-    def __init__(self, doc):
-        obj = doc["pastTenseMessage"]
-        self.message = obj["value"]
-        self.uris = obj["uris"]
-    
-    def build(self):
-        fmt = lambda obj : os.path.basename(obj["path"])
-        repl = lambda match : f"`{fmt(self.uris[match.group('uri')])}`"
-        pattern = r"\[\]\((?P<uri>[^)]*)\)"
-        self.message = re.sub(pattern, repl, self.message)
-        return BlockquoteTag(Text(
-            Text.Text(self.message)
-        ))
+class ToolGetErrors(MessageNode):
+    pass
 
 class ToolEdit(Container):
     @staticmethod
@@ -412,16 +467,19 @@ class ToolEdit(Container):
             yield Text(Text.Text("Edited "), Text.Code(os.path.basename(path)))
             prev = fileVersions[-1] if fileVersions else None
             if prev is not None:
-                yield Details(
-                    CodeBlock(
-                        lang="diff",
-                        codeLines=unified_diff(
+                diffLines = list(
+                    unified_diff(
                             prev.buffer,
                             file.buffer,
                             lineterm="",
                             fromfile="before",
                             tofile="after"
-                        )
+                    )
+                )
+                yield Details(
+                    CodeBlock(
+                        lang="diff",
+                        codeLines=diffLines
                     )
                 )
             fileVersions.append(file)
@@ -488,5 +546,3 @@ class ToolReplaceString(ToolEdit):
             file.applyEdits(fileEdit["edits"])
             editedFiles[path] = file
         return editedFiles
-        
-
