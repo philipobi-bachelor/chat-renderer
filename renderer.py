@@ -8,6 +8,8 @@ from abc import ABC, abstractmethod
 from pathlib import PurePath
 from .utils import Join, Buffered, MatchedFilter, Matcher
 from .markdown import Document, Text, BlockquoteTag, CodeBlock, Details, Wrapper
+import logging
+import sys
 
 def unpackRange(range):
     return itemgetter(
@@ -130,9 +132,20 @@ class Container(Node):
     
     def build(self):
         return Wrapper(content_it=self.buildContent())
-        
+
+class Logger:
+    @staticmethod
+    def config():
+        logger = logging.getLogger(__name__)
+        logger.setLevel(logging.INFO)
+        handler = logging.StreamHandler(sys.stdout)
+        logger.addHandler(handler)
+        return logger
+    
+    logger = config()
+
 class Chat(Container): 
-    instance = None   
+    instance = None
 
     def __init__(self, doc, header=None):
         Chat.instance = self
@@ -150,7 +163,7 @@ class Chat(Container):
                    content = f.read()
                    self.files[path].insert(0, File(buffer=content.split('\n'))) 
             except FileNotFoundError:
-                print("Could not find requested file " + path)
+                Logger.logger.warning("Could not find requested file " + path)
                 continue
     
     @classmethod
@@ -248,7 +261,8 @@ class Response(Container):
             if obj:
                 yield obj
             else:
-                print(f"Unknown chunk encountered:\n{chunk}")
+                Logger.logger.info("Unknown chunk encountered:")
+                Logger.logger.info(str(chunk))
    
     def __init__(self, lst):
         super().__init__(*self.processChunks(lst))
@@ -470,8 +484,8 @@ class ToolInsertEdit(ToolEdit):
         )
         chunks = list(matchedFilter)
         if matchedFilter.error:
-            print("Error extracting copilot_insertEdit information")
-            print(matchedFilter.errorObj)
+            Logger.logger.warning("Error extracting copilot_insertEdit information")
+            Logger.logger.warning(matchedFilter.errorObj)
         return chunks
     
     def editFiles(self):
@@ -499,8 +513,8 @@ class ToolReplaceString(ToolEdit):
         )
         chunks = list(matchedFilter)
         if matchedFilter.error:
-            print("Error extracting copilot_replaceString information")
-            print(matchedFilter.errorObj)
+            Logger.logger.warning("Error extracting copilot_replaceString information")
+            Logger.logger.warning(matchedFilter.errorObj)
         return chunks
 
     def editFiles(self):
