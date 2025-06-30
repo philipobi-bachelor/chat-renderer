@@ -82,56 +82,8 @@ class File:
         self.buffer = self.buffer[:startLineNumber-1] + lines + self.buffer[endLineNumber:]
 
     def insertEdit(self, obj):
-        obj["text"] = obj["text"].rstrip("\n")
+        obj["text"] = obj["text"].lstrip("\n")
         self.replaceString(obj)
-    
-    def insert(self, start, end, strings):
-        buffer = self.buffer
-        (startLineNumber, startColumn) = start
-        (endLineNumber, endColumn) = end
-        
-        if (nLines:=(endLineNumber - len(buffer))) > 0: buffer.extend([""]*nLines)
-        
-        for i, string in zip(
-            range(startLineNumber, endLineNumber + 1),
-            strings
-        ):
-            line = buffer[i-1]
-            if startLineNumber == endLineNumber:
-                buffer[i-1] = line[:startColumn-1] + string + line[endColumn-1:]
-            elif i == startLineNumber: 
-                buffer[i-1] = line[:startColumn-1] + string
-            elif i == endLineNumber:
-                buffer[i-1] = string + line[endColumn-1:]
-            else: 
-                buffer[i-1] = string
-
-    def applyEdits(self, edits):
-        for edit in (
-            obj 
-            for lst in edits
-                for obj in lst
-        ):
-            text = edit["text"]
-            (startLineNumber, startColumn, endLineNumber, endColumn) = unpackRange(edit["range"])
-            
-            if startLineNumber == endLineNumber: 
-                text = text.lstrip("\n")
-            
-            lineEdits = text.split('\n')
-            
-            if (nChars := len(lineEdits[-1])) > endColumn - startColumn:
-                endColumn = startColumn + nChars
-            else:
-                lineEdits = text.split('\n')
-            
-            endLineNumber = startLineNumber + len(lineEdits) - 1
-
-            self.insert(
-                start=(startLineNumber, startColumn), 
-                end=(endLineNumber, endColumn), 
-                strings=lineEdits
-            )
 
 class Node(ABC):
     @abstractmethod
@@ -172,16 +124,19 @@ class Chat(Container):
         self.responderUsername = doc["responderUsername"]
         self.files = defaultdict(list)
         self.requestedFiles = set()
+        self.editedFiles = set()
 
         super().__init__(content_it=[Request(req) for req in doc["requests"]])
 
         for path in self.requestedFiles:
+            resPath = Path.resolve(path)
             try:
-                with open(Path.resolve(path), "r") as f:
+                with open(resPath, "r") as f:
                    content = f.read()
                    self.files[path].insert(0, File(buffer=content.split('\n'))) 
-            except FileNotFoundError:
-                Logger.logger.warning("Could not find requested file " + path)
+            except FileNotFoundError as e:
+                Logger.logger.warning(f"Could not find requested file {path} (resolved to: {resPath})")
+                Logger.logger.exception(e, exc_info=True)
                 continue
     
     @classmethod
@@ -190,11 +145,58 @@ class Chat(Container):
             doc = DB.getDocument("chat-logs", key), 
             header = Text(Text.Text("Document ID: "), Text.Code(f"chat-logs/{key}"))
         )
-
+    
     def build(self):
+        editedFilesBlock = None
+        
+        editedFiles = self.editedFiles & set(self.files.keys())
+
+        if len(editedFiles) > 0:
+            def func(path):
+                fmtPath = Path.format(path)
+                fileA = self.files[path][0]
+                fileB = self.files[path][-1]
+                fromfile = f"a/{fmtPath}"
+                tofile = f"b/{fmtPath}"
+                nLines = max(len(fileA.buffer), len(fileB.buffer))
+                return Wrapper(
+                    Text(Text.Code(fmtPath), Text.Text(":")),
+                    Details(
+                        CodeBlock(
+                        lang="diff",
+                        codeLines=unified_diff(
+                            fileA.buffer,
+                            fileB.buffer,
+                            fromfile=fromfile,
+                            tofile=tofile,
+                            lineterm="")
+                        ),
+                        summary="Squashed changes (short)"
+                    ),
+                    Details(
+                        CodeBlock(
+                        lang="diff",
+                        codeLines=unified_diff(
+                            fileA.buffer,
+                            fileB.buffer,
+                            fromfile=fromfile,
+                            tofile=tofile,
+                            n=nLines,
+                            lineterm="")
+                        ),
+                        summary="Squashed changes (full)"
+                    )
+                )
+
+            editedFilesBlock = BlockquoteTag(
+                Text(Text.Heading(5, "Edited Files:")),
+                Wrapper(content_it=map(func, editedFiles))
+            )
+
         return Document(
             self.header,
-            Wrapper(content_it=self.buildContent())
+            Wrapper(content_it=self.buildContent()),
+            editedFilesBlock
         )
 
 class Request(Container):
@@ -450,15 +452,12 @@ class ToolEdit(Container):
         self.chunks = self.makeChunks(it)
 
         for fileEdit in self.getFileEdits(self.chunks):
-            Chat.instance.requestedFiles.add(
-                fileEdit["uri"]["path"]
-            )
+            path = fileEdit["uri"]["path"]
+            Chat.instance.requestedFiles.add(path)
+            Chat.instance.editedFiles.add(path)
     
     def build(self):
         return BlockquoteTag(content_it=self.buildContent())
-
-    def editFiles(self):
-        pass
     
     def buildContent(self):
         editedFiles = self.editFiles()
@@ -468,22 +467,44 @@ class ToolEdit(Container):
             yield Text(Text.Text("Edited "), Text.Code(Path.format(path)))
             prev = fileVersions[-1] if fileVersions else None
             if prev is not None:
-                diffLines = list(
-                    unified_diff(
-                            prev.buffer,
-                            file.buffer,
-                            lineterm="",
-                            fromfile="before",
-                            tofile="after"
-                    )
-                )
+                fmtPath = Path.format(path)
                 yield Details(
                     CodeBlock(
                         lang="diff",
-                        codeLines=diffLines
+                        codeLines=unified_diff(
+                            prev.buffer,
+                            file.buffer,
+                            lineterm="",
+                            fromfile="a/" + fmtPath,
+                            tofile="b/" + fmtPath
+                        )
                     )
                 )
             fileVersions.append(file)
+
+
+    def editFile(self, file:File, edits):
+        pass
+    
+    def editFiles(self):
+        editedFiles = {}
+        for fileEdit in self.getFileEdits(self.chunks):
+            path = fileEdit["uri"]["path"]
+            file = editedFiles.get(path, None)
+            if file is None:
+                fileVersions = Chat.instance.files[path]
+                prev = fileVersions[-1] if fileVersions else None
+                file = File.copy(prev) if prev else File()
+            edits = (
+                edit
+                for lst in fileEdit["edits"]
+                    for edit in lst
+            )
+            self.editFile(file, edits)
+            editedFiles[path] = file
+
+        return editedFiles
+
 
 class ToolInsertEdit(ToolEdit):
     @staticmethod
@@ -506,14 +527,9 @@ class ToolInsertEdit(ToolEdit):
             Logger.logger.warning(matchedFilter.errorObj)
         return chunks
     
-    def editFiles(self):
-        editedFiles = {}
-        for fileEdit in self.getFileEdits(self.chunks):
-            path = fileEdit["uri"]["path"]
-            file = File()
-            file.applyEdits(fileEdit["edits"])
-            editedFiles[path] = file
-        return editedFiles
+    def editFile(self, file:File, edits):
+        for edit in edits:
+            file.insertEdit(edit)
 
 class ToolReplaceString(ToolEdit):
     @staticmethod
@@ -535,15 +551,6 @@ class ToolReplaceString(ToolEdit):
             Logger.logger.warning(matchedFilter.errorObj)
         return chunks
 
-    def editFiles(self):
-        editedFiles = {}
-        for fileEdit in self.getFileEdits(self.chunks):
-            path = fileEdit["uri"]["path"]
-            file = editedFiles.get(path, None)
-            if file is None:
-                fileVersions = Chat.instance.files[path]
-                prev = fileVersions[-1] if fileVersions else None
-                file = File.copy(prev) if prev else File()
-            file.applyEdits(fileEdit["edits"])
-            editedFiles[path] = file
-        return editedFiles
+    def editFile(self, file:File, edits):
+        for edit in edits:
+            file.replaceString(edit)
