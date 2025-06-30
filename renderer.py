@@ -63,9 +63,27 @@ class File:
     def __init__(self, buffer = None):
         self.buffer = buffer or []
 
+    """
+    Ranges are [startLine, endLine] [startColumn, endColumn)
+    """
+
     @classmethod
     def copy(cls, original):
         return cls(original.buffer.copy())
+    
+    def replaceString(self, obj):
+        (startLineNumber, startColumn, endLineNumber, endColumn) = unpackRange(obj["range"])
+        if (nLinesAdded:= endLineNumber-len(self.buffer)) > 0: self.buffer.extend([""]*nLinesAdded)
+        
+        text = obj["text"]
+        lines = text.split('\n')
+        lines[0] = self.buffer[startLineNumber-1][:startColumn-1] + lines[0]
+        lines[-1] = lines[-1] + self.buffer[endLineNumber-1][endColumn-1:]
+        self.buffer = self.buffer[:startLineNumber-1] + lines + self.buffer[endLineNumber:]
+
+    def insertEdit(self, obj):
+        obj["text"] = obj["text"].rstrip("\n")
+        self.replaceString(obj)
     
     def insert(self, start, end, strings):
         buffer = self.buffer
