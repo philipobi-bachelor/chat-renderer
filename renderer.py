@@ -240,7 +240,9 @@ class Request(Container):
                         content = Chat.instance.responderUsername + (f" ({self.model}):" if self.model else ":")
                 )),
                 Wrapper(content_it=self.buildContent()),
-                Text(Text.Text("Error: "), Text.Text(self.error.get("message", "Unknown Error"))) if self.error is not None else None,
+                BlockquoteTag(
+                    Text(Text.Text("Error: "), Text.Text(self.error.get("message", "Unknown Error")))
+                ) if self.error is not None else None,
                 Text(Text.Code(f"({fmtDuration(self.timeMs)})"))
             )
         )
