@@ -215,6 +215,7 @@ class Request(Container):
         result = request["result"]
         responseId = result["metadata"]["responseId"]
         self.model = Request.getModel(responseId)
+        self.error = result.get("errorDetails", None)
         self.timeMs = result["timings"]["totalElapsed"]
         self.message = request["message"]["text"]
         self.response = Response(request["response"])
@@ -239,6 +240,7 @@ class Request(Container):
                         content = Chat.instance.responderUsername + (f" ({self.model}):" if self.model else ":")
                 )),
                 Wrapper(content_it=self.buildContent()),
+                Text(Text.Text("Error: "), Text.Text(self.error.get("message", "Unknown Error"))) if self.error is not None else None,
                 Text(Text.Code(f"({fmtDuration(self.timeMs)})"))
             )
         )
