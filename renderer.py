@@ -218,7 +218,7 @@ class Request(Container):
         self.timeMs = result["timings"]["totalElapsed"]
         self.message = request["message"]["text"]
         self.response = Response(request["response"])
-        
+        self.variables = list(dict.fromkeys(map(lambda varObj: varObj["name"], request["variableData"]["variables"])))
         super().__init__(self.response)
     
     def build(self):
@@ -227,7 +227,11 @@ class Request(Container):
                 Text(
                     Text.Heading(4, Chat.instance.requesterUsername + ':'),
                     Text.Text(self.message)
-                )
+                ),
+                Text(
+                    Text.Text("Variables: "),
+                    *Join(map(lambda varName: Text.Code(varName), self.variables), Text.Text(", "))
+                ) if self.variables else None
             ),
             BlockquoteTag(
                 Text(Text.Heading(
