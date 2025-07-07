@@ -28,10 +28,16 @@ def fmtDuration(durationMs):
     return output
 
 class DB:
+    addr = "http://project-db:8529"
+    
+    @staticmethod
+    def getCollection(coll):
+        return ArangoClient(DB.addr).db().collection(coll)
+    
     @staticmethod
     def getDocument(coll, key):
-        coll = ArangoClient("http://localhost:8529").db().collection(coll)
-        return coll.get(key)
+        return DB.getCollection(coll).get(key)
+    
 
 class Path:
     root = PurePath("/project/agkuhr/users/pobi/b2")
@@ -203,7 +209,7 @@ class Request(Container):
     @staticmethod
     def getModel(responseId):
         try:
-            coll = ArangoClient("http://localhost:8529").db().collection("chat-ids")
+            coll = DB.getCollection("chat-ids")
             cursor = coll.find({"request_id": responseId}, skip=0, limit=1)
             if cursor.empty(): return None
             else: return cursor.next()["model"]
