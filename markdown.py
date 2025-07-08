@@ -9,7 +9,7 @@ class Container(Node):
     def __init__(self, *content, content_it=None):
         self.content = filter(
             lambda item: item is not None,
-            content or content_it
+            content or content_it or []
         )
 
     def flattenContent(self):

@@ -40,12 +40,14 @@ class DB:
     
 
 class Path:
-    root = PurePath("/project/agkuhr/users/pobi/b2")
+    home = PurePath("/home/p/Philip.Obi")
+    b2root = PurePath("/project/agkuhr/users/pobi/b2")
     roots = [
-        root,
-        root / "basf2",
-        root / "basf2-v1",
-        root / "basf2-v2",
+        home,
+        b2root,
+        b2root / "basf2",
+        b2root / "basf2-v1",
+        b2root / "basf2-v2",
     ]
 
     @staticmethod
@@ -98,7 +100,7 @@ class Node(ABC):
 
 class Container(Node):
     def __init__(self, *content, content_it=None):
-        self.content = content or content_it
+        self.content = content or content_it or []
     
     def buildContent(self):
         return map(
@@ -141,7 +143,8 @@ class Chat(Container):
                    content = f.read()
                    self.files[path].insert(0, File(buffer=content.split('\n'))) 
             except FileNotFoundError as e:
-                Logger.logger.warning(f"Could not find requested file {path} (resolved to: {resPath})")
+                self.files[path].insert(0, File())
+                Logger.logger.warning(f"Could not find requested file {path} (resolved to: {resPath}), used empty file instead")
                 Logger.logger.exception(e, exc_info=True)
                 continue
     
@@ -277,6 +280,9 @@ class Response(Container):
                     case "toolInvocationSerialized":
                         toolId = chunk["toolId"]
                         match toolId:
+                            case "copilot_createFile":
+                                it.enqueue(chunk)
+                                obj = ToolCreateFile(it)
                             case "copilot_insertEdit":
                                 it.enqueue(chunk)
                                 obj = ToolInsertEdit(it)
@@ -291,6 +297,8 @@ class Response(Container):
                                 obj = ToolFindFiles(chunk)
                             case "copilot_getErrors":
                                 obj = ToolGetErrors(chunk)
+                            case "copilot_runInTerminal":
+                                obj = ToolRunInTerminal(chunk)
             
             if obj:
                 yield obj
@@ -431,6 +439,29 @@ class ToolFindTextInFiles(Container):
             Details(Text(content_it=self.buildContent())) if self.resultDetails else None
         )
 
+class ToolRunInTerminal(Node):
+    def __init__(self, doc):
+        self.obj = doc
+            
+    def build(self):
+        toolSpecificData = self.obj.get("toolSpecificData", None)
+        if toolSpecificData is None:
+            Logger.logger.warning("copilot_runInTerminal invocation has no toolSpecificData")
+            Logger.logger.warning(self.obj)
+            return None
+        
+        return BlockquoteTag(
+            Text(Text.Text("Run in Terminal:")),
+            CodeBlock(
+                codeLines=toolSpecificData.get("command", "").split('\n'),
+                lang=toolSpecificData.get("language", "")
+            ),
+            Text(
+                Text.Text("Executed: "), 
+                Text.Code("true" if self.obj.get("isConfirmed", False) else "false")
+            )
+        )
+
 class ToolFindFiles(Node):
     def __init__(self, doc):
         self.message = doc["pastTenseMessage"]["value"]
@@ -551,7 +582,7 @@ class ToolReplaceString(ToolEdit):
         matchedFilter = MatchedFilter(
             it,
             (
-                Matcher(lambda c: c.get("toolId", "") == "copilot_replaceString"),
+                Matcher(lambda c: c.get("toolId", "") == "copilot_replaceString", n=-1),
                 Matcher(lambda c: c.get("value", "") == "\n```\n"),
                 Matcher(lambda c: c.get("kind", "") == "undoStop"),
                 Matcher(lambda c: c.get("kind", "") == "codeblockUri"),
@@ -568,3 +599,37 @@ class ToolReplaceString(ToolEdit):
     def editFile(self, file:File, edits):
         for edit in edits:
             file.replaceString(edit)
+
+class ToolCreateFile(ToolEdit):
+    @staticmethod
+    def makeChunks(it: Buffered):
+        matchedFilter = MatchedFilter(
+            it,
+            (
+                Matcher(lambda c: c.get("toolId", "") == "copilot_createFile"),
+                Matcher(lambda c: c.get("kind", "") == "textEditGroup", n=-1) ,
+            )
+        )
+        chunks = list(matchedFilter)
+        if matchedFilter.error:
+            Logger.logger.warning("Error extracting copilot_createFile information")
+            Logger.logger.warning(matchedFilter.errorObj)
+        return chunks
+    
+    def editFile(self, file:File, edits):
+        for edit in edits:
+            file.insertEdit(edit)
+
+    def __init__(self, it):
+        self.chunks = self.makeChunks(it)
+
+        for fileEdit in self.getFileEdits(self.chunks):
+            self.createdFilePath = fileEdit["uri"]["path"]
+            #initialize empty file
+            Chat.instance.files[self.createdFilePath].insert(0, File())
+            Chat.instance.editedFiles.add(self.createdFilePath)
+
+    def buildContent(self):
+        yield Text(Text.Text("Created "), Text.Code(Path.format(self.createdFilePath)))
+        yield from super().buildContent()
+
