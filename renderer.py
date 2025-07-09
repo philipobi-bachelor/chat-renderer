@@ -276,7 +276,9 @@ class Response(Container):
                 match kind:
                     case "prepareToolInvocation": continue
                     case "confirmation":
-                        obj = Confirmation(chunk)      
+                        obj = Confirmation(chunk)
+                    case "progressTaskSerialized":
+                        obj = ProgressTaskSerialized(chunk)
                     case "toolInvocationSerialized":
                         toolId = chunk["toolId"]
                         match toolId:
@@ -293,6 +295,8 @@ class Response(Container):
                                 obj = ToolReadFile(chunk)
                             case "copilot_findTextInFiles":
                                 obj = ToolFindTextInFiles(chunk)
+                            case "copilot_searchCodebase":
+                                obj = ToolSearchCodebase(chunk)
                             case "copilot_findFiles":
                                 obj = ToolFindFiles(chunk)
                             case "copilot_getErrors":
@@ -316,6 +320,14 @@ class Confirmation(Node):
     def build(self):
         return BlockquoteTag(Text(
             Text.Text(self.message)
+        ))
+    
+class ProgressTaskSerialized(Node):
+    def __init__(self, doc):
+        self.text = doc["content"]["value"]
+    def build(self):
+        return BlockquoteTag(Text(
+            Text.Text(self.text)
         ))
 
 class ResponseText(Container):
@@ -416,8 +428,8 @@ class MessageNode(Node):
 
 class ToolReadFile(MessageNode):
     pass        
-        
-class ToolFindTextInFiles(Container):
+
+class ToolSearch(Container):
     def __init__(self, doc):
         self.message = doc["pastTenseMessage"]["value"]
         self.resultDetails = doc["resultDetails"]
@@ -438,6 +450,12 @@ class ToolFindTextInFiles(Container):
             Text(Text.Text(self.message)),
             Details(Text(content_it=self.buildContent())) if self.resultDetails else None
         )
+
+class ToolFindTextInFiles(ToolSearch):
+    pass
+
+class ToolSearchCodebase(ToolSearch):
+    pass
 
 class ToolRunInTerminal(Node):
     def __init__(self, doc):
@@ -549,7 +567,6 @@ class ToolEdit(Container):
             editedFiles[path] = file
 
         return editedFiles
-
 
 class ToolInsertEdit(ToolEdit):
     @staticmethod
