@@ -90,3 +90,17 @@ class Join(Iterator):
             except StopIteration: return self.deque.popleft()
             self.deque.extend([self.fillObj, obj])
         return self.deque.popleft()
+
+
+class Append(Iterator):
+    def __init__(self, it, item):
+        self.it = iter(it)
+        self.item = item
+        self.exhausted = False
+    def __next__(self):
+        if self.exhausted: raise StopIteration
+        
+        try: return next(self.it)
+        except StopIteration:
+            self.exhausted = True
+            return self.item
