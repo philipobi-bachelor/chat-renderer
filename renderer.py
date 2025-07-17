@@ -498,11 +498,18 @@ class ToolSearch(Container):
 
     def buildContent(self):
         def func(result):
-            sl, sc, el, ec = unpackRange(result["range"])
-            path = Path.format(result["uri"]["path"])
-            return Text.Code(f"{path}:{sl}:{sc}-{el}:{ec}")
+            if "uri" in result and "range" in result:
+                sl, sc, el, ec = unpackRange(result["range"])
+                path = Path.format(result["uri"]["path"])
+                return Text.Code(f"{path}:{sl}:{sc}-{el}:{ec}")
+            elif "path" in result:
+                return Text.Code(Path.format(result["path"]))
+            else:
+                Logger.logger.warning("Unknown search result encountered")
+                Logger.logger.warning(result)
+                return None
 
-        return Join(map(func, self.resultDetails), Text.Linebreak())
+        return Join(filter(None, map(func, self.resultDetails)), Text.Linebreak())
 
     def build(self):
         return BlockquoteTag(
