@@ -324,6 +324,8 @@ class Response(Container):
                 match kind:
                     case "prepareToolInvocation":
                         continue
+                    case "codeblockUri":
+                        continue
                     case "confirmation":
                         obj = Confirmation(chunk)
                     case "progressTaskSerialized":
