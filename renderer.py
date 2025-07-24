@@ -408,6 +408,7 @@ class ResponseText(Container):
             else:
                 return Text.Code(self.text)
 
+    
     def __init__(self, it):
         chunks = []
         for chunk in it:
@@ -416,6 +417,8 @@ class ResponseText(Container):
                 chunks.append(ResponseText.InlineReference(chunk))
             elif "value" in chunk and kind is None:
                 chunks.append(ResponseText.Text(chunk))
+            elif kind == "codeblockUri":
+                continue
             else:
                 it.enqueue(chunk)
                 break
