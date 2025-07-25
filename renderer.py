@@ -330,6 +330,8 @@ class Response(Container):
                         obj = Confirmation(chunk)
                     case "progressTaskSerialized":
                         obj = ProgressTaskSerialized(chunk)
+                    case "progressTask":
+                        continue
                     case "toolInvocationSerialized":
                         toolId = chunk["toolId"]
                         match toolId:
@@ -424,54 +426,7 @@ class ResponseText(Container):
                 break
         super().__init__(content_it=chunks)
 
-    @staticmethod
-    def fixInlineRefs(it):
-        it = iter(it)
-
-        def fix(buffer):
-            [obj, ref, obj1] = buffer
-
-            if not isinstance(obj, ResponseText.Text):
-                return
-
-            inCode = False
-            txt = obj
-            for _ in filter(lambda c: c == "`", txt.text):
-                inCode ^= True
-
-            if not inCode:
-                return
-
-            [txt.text, code] = txt.text.rsplit("`", 1)
-            txt1 = obj1
-            [code1, txt1.text] = txt1.text.split("`", 1)
-
-            buffer[1] = ResponseText.Text(
-                {"value": "`" + code + ref.text + code1 + "`"}
-            )
-
-        buffer = deque(maxlen=3)
-        try:
-            while True:
-                while len(buffer) < 3:
-                    buffer.append(next(it))
-                iInlineRef = -1
-                for i, item in enumerate(buffer):
-                    if isinstance(item, ResponseText.InlineReference):
-                        iInlineRef = i
-                        break
-                if iInlineRef == 1:
-                    fix(buffer)
-                    yield buffer.popleft()
-                    yield buffer.popleft()
-                else:
-                    yield buffer.popleft()
-        except StopIteration:
-            yield from buffer
-            buffer.clear()
-
     def build(self):
-        self.content = list(self.fixInlineRefs(self.content))
         return Text(content_it=self.buildContent())
 
 
